@@ -1,0 +1,608 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: "AgentCore Runtime - S3 Source"
+
+Resources:
+  # S3 Bucket for Agent Source Code
+  AgentSourceBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W51
+            reason: "Bucket policy not required - using IAM role-based access control"
+          - id: W35
+            reason: "Access logging creates circular dependency - consider separate logging bucket if needed"
+    Properties:
+      BucketName: !Sub '${AWS::StackName}-agent-source-${AWS::AccountId}'
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Agent-Source-Bucket'
+
+  AgentCoreRuntimeExecutionRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "ECR GetAuthorizationToken, XRay, and CloudWatch actions require wildcard resources"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: AssumeRolePolicy
+            Effect: Allow
+            Principal:
+              Service: bedrock-agentcore.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                'aws:SourceAccount': !Ref AWS::AccountId
+              ArnLike:
+                'aws:SourceArn': !Sub 'arn:aws:bedrock-agentcore:${AWS::Region}:${AWS::AccountId}:*'
+      Policies:
+        - PolicyName: AgentCoreRuntimeExecutionPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Sid: ECRImageAccess
+                Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                Resource:
+                  - !Sub 'arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/*'
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogStreams
+                  - logs:CreateLogGroup
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*'
+              - Effect: Allow
+                Action:
+                  - logs:DescribeLogGroups
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:*'
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*'
+              - Sid: ECRTokenAccess
+                Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - xray:PutTraceSegments
+                  - xray:PutTelemetryRecords
+                  - xray:GetSamplingRules
+                  - xray:GetSamplingTargets
+                Resource: '*'
+              - Effect: Allow
+                Resource: '*'
+                Action: cloudwatch:PutMetricData
+                Condition:
+                  StringEquals:
+                    'cloudwatch:namespace': 'bedrock-agentcore'
+              - Sid: BedrockModelAccess
+                Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource:
+                  - 'arn:aws:bedrock:*::foundation-model/*'
+                  - !Sub 'arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:*'
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Runtime-Role'
+
+  # ECR Repository for Agent Docker Images
+  AgentECRRepository:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Delete
+    Properties:
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep last 10 images",
+                "selection": {
+                  "tagStatus": "any",
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": {
+                  "type": "expire"
+                }
+              }
+            ]
+          }
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Agent-ECR-Repository'
+
+  # CodeBuild Service Role for Docker Image Build
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "ECR GetAuthorizationToken requires wildcard resource"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: CodeBuildLogsPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource:
+                  - "*"
+        - PolicyName: ECRAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:BatchCheckLayerAvailability
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchGetImage
+                  - ecr:GetAuthorizationToken
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - ecr:InitiateLayerUpload
+                  - ecr:UploadLayerPart
+                  - ecr:CompleteLayerUpload
+                  - ecr:PutImage
+                Resource: !GetAtt AgentECRRepository.Arn
+        - PolicyName: S3AccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                Resource:
+                  - !Sub '${AgentSourceBucket.Arn}/agent.zip'
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource:
+                  - !GetAtt AgentSourceBucket.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-CodeBuild-Role'
+
+  # CodeBuild Project for Agent Docker Image
+  AgentDockerBuildProject:
+    Type: AWS::CodeBuild::Project
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W32
+            reason: "Using AWS managed encryption keys instead of customer managed KMS key"
+    Properties:
+      Description: 'Build and push agent Docker image to ECR from S3 source'
+      ServiceRole: !GetAtt CodeBuildServiceRole.Arn
+      Artifacts:
+        Type: NO_ARTIFACTS
+      Environment:
+        Type: ARM_CONTAINER
+        ComputeType: BUILD_GENERAL1_LARGE
+        Image: aws/codebuild/amazonlinux2-aarch64-standard:3.0
+        PrivilegedMode: true
+        EnvironmentVariables:
+          - Name: ECR_REPOSITORY_URI
+            Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AgentECRRepository}'
+          - Name: ECR_REPOSITORY_NAME
+            Value: !Ref AgentECRRepository
+          - Name: AWS_DEFAULT_REGION
+            Value: !Ref AWS::Region
+          - Name: AWS_ACCOUNT_ID
+            Value: !Ref AWS::AccountId
+      Source:
+        Type: S3
+        Location: !Sub '${AgentSourceBucket}/agent.zip'
+        BuildSpec: |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - echo "Checking current directory and contents..."
+                - pwd
+                - ls -la
+                - echo "Checking for Dockerfile..."
+                - cat Dockerfile || echo "Dockerfile not found"
+                - echo "Generating unique image tag..."
+                - export IMAGE_TAG="build-${CODEBUILD_BUILD_NUMBER}"
+                - echo "Image will be tagged as ${IMAGE_TAG}"
+            build:
+              commands:
+                - echo "Starting parallel Docker build and ECR authentication..."
+                - |
+                  docker build -t bedrock-agentcore-arm64 . &
+                  BUILD_PID=$!
+                  aws ecr get-login-password --region $AWS_DEFAULT_REGION | \
+                  docker login --username AWS --password-stdin $ECR_REPOSITORY_URI &
+                  AUTH_PID=$!
+                  echo "Waiting for Docker build to complete..."
+                  wait $BUILD_PID
+                  if [ $? -ne 0 ]; then
+                    echo "Docker build failed"
+                    exit 1
+                  fi
+                  echo "Waiting for ECR authentication to complete..."
+                  wait $AUTH_PID
+                  if [ $? -ne 0 ]; then
+                    echo "ECR authentication failed"
+                    exit 1
+                  fi
+                  echo "Both build and auth completed successfully"
+                - echo "Tagging image with unique tag ${IMAGE_TAG}..."
+                - docker tag bedrock-agentcore-arm64:latest $ECR_REPOSITORY_URI:${IMAGE_TAG}
+            post_build:
+              commands:
+                - echo "Pushing ARM64 image to ECR with unique tag ${IMAGE_TAG}..."
+                - docker push $ECR_REPOSITORY_URI:${IMAGE_TAG}
+                - echo "Build completed at $(date)"
+                - echo "Image tag pushed - ${IMAGE_TAG}"
+      TimeoutInMinutes: 30
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-Agent-Docker-Build'
+
+  # Lambda Execution Role for ECR Image Notification
+  ECRImageNotificationLambdaRole:
+    Type: AWS::IAM::Role
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W11
+            reason: "BedrockAgentCore List/Get operations require wildcard resource"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: ECRAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ecr:DescribeImages
+                  - ecr:ListImages
+                Resource: !GetAtt AgentECRRepository.Arn
+        - PolicyName: BedrockAgentCoreAccessPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock-agentcore:ListAgentRuntimes
+                  - bedrock-agentcore:ListAgentRuntimeEndpoints
+                  - bedrock-agentcore:ListAgentRuntimeVersions
+                  - bedrock-agentcore:GetAgentRuntime
+                  - bedrock-agentcore:GetAgentRuntimeEndpoint
+                  - bedrock-agentcore:UpdateAgentRuntime
+                  - bedrock-agentcore:UpdateAgentRuntimeEndpoint
+                Resource: '*'
+        - PolicyName: IAMPassRole
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iam:PassRole
+                Resource: !GetAtt AgentCoreRuntimeExecutionRole.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-ECR-Notification-Role'
+
+  # Lambda Execution Role for S3 Trigger
+  S3TriggerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: CodeBuildTriggerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                Resource: !GetAtt AgentDockerBuildProject.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-S3-Trigger-Role'
+
+  # Lambda Function to Trigger CodeBuild on S3 Upload
+  S3TriggerFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "Lambda function does not need VPC access - triggers CodeBuild via API"
+    Properties:
+      FunctionName: !Sub '${AWS::StackName}-s3-trigger'
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt S3TriggerLambdaRole.Arn
+      Timeout: 60
+      ReservedConcurrentExecutions: 1
+      Environment:
+        Variables:
+          CODEBUILD_PROJECT_NAME: !Ref AgentDockerBuildProject
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import logging
+          import os
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              try:
+                  logger.info(f"Received S3 event: {json.dumps(event)}")
+
+                  # Parse S3 event
+                  for record in event['Records']:
+                      bucket = record['s3']['bucket']['name']
+                      key = record['s3']['object']['key']
+
+                      logger.info(f"File uploaded: s3://{bucket}/{key}")
+
+                      # Only trigger build for agent.zip
+                      if key == 'agent.zip':
+                          project_name = os.environ['CODEBUILD_PROJECT_NAME']
+                          codebuild = boto3.client('codebuild')
+
+                          logger.info(f"Starting CodeBuild project: {project_name}")
+
+                          response = codebuild.start_build(projectName=project_name)
+                          build_id = response['build']['id']
+
+                          logger.info(f"Build started successfully with ID: {build_id}")
+
+                          return {
+                              'statusCode': 200,
+                              'body': json.dumps({
+                                  'message': 'CodeBuild triggered successfully',
+                                  'buildId': build_id
+                              })
+                          }
+                      else:
+                          logger.info(f"Ignoring file: {key} (only agent.zip triggers builds)")
+                          return {
+                              'statusCode': 200,
+                              'body': json.dumps({'message': 'File ignored'})
+                          }
+
+              except Exception as e:
+                  logger.error(f"Error: {str(e)}", exc_info=True)
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-S3-Trigger-Function'
+
+  # Lambda Permission for S3 to invoke function
+  S3TriggerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref S3TriggerFunction
+      Action: lambda:InvokeFunction
+      Principal: s3.amazonaws.com
+      SourceArn: !GetAtt AgentSourceBucket.Arn
+
+  # Custom Resource to configure S3 bucket notification
+  S3NotificationConfigRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: S3BucketNotificationPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutBucketNotification
+                  - s3:GetBucketNotification
+                Resource: !GetAtt AgentSourceBucket.Arn
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-S3-Notification-Config-Role'
+
+  S3NotificationConfigFunction:
+    Type: AWS::Lambda::Function
+    Metadata:
+      cfn_nag:
+        rules_to_suppress:
+          - id: W89
+            reason: "Lambda function does not need VPC access - configures S3 notifications via API"
+    Properties:
+      Runtime: python3.13
+      Handler: index.lambda_handler
+      Role: !GetAtt S3NotificationConfigRole.Arn
+      Timeout: 60
+      ReservedConcurrentExecutions: 1
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import urllib3
+          import logging
+
+          logger = logging.getLogger()
+          logger.setLevel(logging.INFO)
+
+          def lambda_handler(event, context):
+              try:
+                  logger.info(f"Received event: {json.dumps(event)}")
+
+                  request_type = event['RequestType']
+                  bucket_name = event['ResourceProperties']['BucketName']
+                  lambda_arn = event['ResourceProperties']['LambdaArn']
+
+                  s3_client = boto3.client('s3')
+
+                  if request_type in ['Create', 'Update']:
+                      logger.info(f"Configuring notification for bucket: {bucket_name}")
+
+                      s3_client.put_bucket_notification_configuration(
+                          Bucket=bucket_name,
+                          NotificationConfiguration={
+                              'LambdaFunctionConfigurations': [
+                                  {
+                                      'LambdaFunctionArn': lambda_arn,
+                                      'Events': ['s3:ObjectCreated:*'],
+                                      'Filter': {
+                                          'Key': {
+                                              'FilterRules': [
+                                                  {
+                                                      'Name': 'suffix',
+                                                      'Value': '.zip'
+                                                  }
+                                              ]
+                                          }
+                                      }
+                                  }
+                              ]
+                          }
+                      )
+
+                      logger.info("Notification configuration completed")
+                      send_response(event, context, 'SUCCESS', {})
+
+                  elif request_type == 'Delete':
+                      logger.info(f"Removing notification for bucket: {bucket_name}")
+
+                      # Remove notification configuration
+                      s3_client.put_bucket_notification_configuration(
+                          Bucket=bucket_name,
+                          NotificationConfiguration={}
+                      )
+
+                      logger.info("Notification configuration removed")
+                      send_response(event, context, 'SUCCESS', {})
+
+              except Exception as e:
+                  logger.error(f"Error: {str(e)}", exc_info=True)
+                  send_response(event, context, 'FAILED', {})
+
+          def send_response(event, context, response_status, response_data):
+              response_body = {
+                  'Status': response_status,
+                  'Reason': 'See CloudWatch Logs',
+                  'PhysicalResourceId': 'S3NotificationConfig',
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId'],
+                  'LogicalResourceId': event['LogicalResourceId'],
+              }
+
+              json_response_body = json.dumps(response_body)
+
+              headers = {
+                  'content-type': '',
+                  'content-length': str(len(json_response_body))
+              }
+
+              http = urllib3.PoolManager()
+              response = http.request('PUT', event['ResponseURL'], body=json_response_body, headers=headers)
+              logger.info(f"Response status: {response.status}")
+      Tags:
+        - Key: Name
+          Value: !Sub '${AWS::StackName}-S3-Notification-Config-Function'
+
+  S3NotificationConfig:
+    Type: AWS::CloudFormation::CustomResource
+    DependsOn: S3TriggerLambdaPermission
+    Properties:
+      ServiceToken: !GetAtt S3NotificationConfigFunction.Arn
+      BucketName: !Ref AgentSourceBucket
+      LambdaArn: !GetAtt S3TriggerFunction.Arn
+
+Outputs:
+  AgentSourceBucketName:
+    Description: 'S3 Bucket name for agent source code (upload agent.zip here)'
+    Value: !Ref AgentSourceBucket
+    Export:
+      Name: !Sub '${AWS::StackName}-AgentSourceBucketName'
+
+  ECRRepositoryUri:
+    Description: 'ECR Repository URI'
+    Value: !Sub '${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${AgentECRRepository}'
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryUri'
+
+  ECRRepositoryName:
+    Description: 'ECR Repository Name'
+    Value: !Ref AgentECRRepository
+    Export:
+      Name: !Sub '${AWS::StackName}-ECRRepositoryName'
+
+  CodeBuildProjectName:
+    Description: 'CodeBuild Project Name'
+    Value: !Ref AgentDockerBuildProject
+    Export:
+      Name: !Sub '${AWS::StackName}-CodeBuildProjectName'

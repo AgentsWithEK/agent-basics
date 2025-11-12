@@ -1,0 +1,32 @@
+{
+    "name": "calculate",
+    "description": "Perform basic arithmetic operations on two numbers. Supports addition, subtraction, multiplication, and division.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "operation": {
+                "type": "string",
+                "enum": [
+                    "add",
+                    "subtract",
+                    "multiply",
+                    "divide"
+                ],
+                "description": "The arithmetic operation to perform"
+            },
+            "num1": {
+                "type": "number",
+                "description": "The first number"
+            },
+            "num2": {
+                "type": "number",
+                "description": "The second number"
+            }
+        },
+        "required": [
+            "operation",
+            "num1",
+            "num2"
+        ]
+    }
+}

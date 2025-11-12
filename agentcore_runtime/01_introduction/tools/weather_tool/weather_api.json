@@ -1,0 +1,25 @@
+{
+    "name": "get_current_weather",
+    "description": "Get the current weather information for a specific location. Returns temperature, conditions, humidity, and wind speed.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "location": {
+                "type": "string",
+                "description": "The city and state/country, e.g. 'NYC, San Francisco, CA' or 'London, UK'"
+            },
+            "unit": {
+                "type": "string",
+                "enum": [
+                    "celsius",
+                    "fahrenheit"
+                ],
+                "description": "The temperature unit to use",
+                "default": "fahrenheit"
+            }
+        },
+        "required": [
+            "location"
+        ]
+    }
+}
