@@ -1,11 +1,9 @@
-# AgentCore for Dummies
+# Agentic AI for Dummies
 
-This playlist shows the basics of Amazon Bedrock AgentCore.
+In this playlist we understand the basics of Agentic AI.
 
 ## Table of Contents
 
-### Amazon Bedrock AgentCore Runtime
-
-| Topic | Description |
-|-------|-------------|
-| [Introduction - Managed Deployment](agentcore_runtime/01_introduction/README.md) | A simple agent with calculator and weather tools demonstrating Amazon Bedrock AgentCore Runtime managed deployment |
+| Module | Description |
+|--------|-------------|
+| [01_introduction](./01_introduction/) | Building a lightweight AI agent framework with Python and LiteLLM. Features multi-tool support with parallel execution, streaming and async capabilities, and interactive CLI examples. |

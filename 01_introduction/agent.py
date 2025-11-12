@@ -1,7 +1,7 @@
-from litellm import completion
-import asyncio
 import json
 import time
+import asyncio
+from litellm import completion
 
 
 class Agent:
@@ -15,7 +15,7 @@ class Agent:
         self.schemas = schemas
         self.functions = functions or {}
 
-    async def invoke(self, user_query: str):
+    def invoke(self, user_query: str):
         start_time = time.time()
 
         if not self.messages:
@@ -91,7 +91,7 @@ class Agent:
                 ]
                 return await asyncio.gather(*tasks)
 
-            results = await execute_all_tools()
+            results = asyncio.run(execute_all_tools())
 
             # Print responses and add to messages
             for idx, tool_call_id, function_response in results:
@@ -104,7 +104,7 @@ class Agent:
                     }
                 )
 
-    async def invoke_stream(self, user_query: str):
+    def invoke_stream(self, user_query: str):
         start_time = time.time()
 
         if not self.messages:
@@ -226,7 +226,7 @@ class Agent:
                 ]
                 return await asyncio.gather(*tasks)
 
-            results = await execute_all_tools()
+            results = asyncio.run(execute_all_tools())
 
             # Print responses and add to messages
             for idx, tool_call_id, function_response in results:

@@ -1,0 +1,20 @@
+{
+    "name": "research_topic",
+    "description": "Delegate complex research questions to a specialized research agent. Use this when you need detailed analysis, factual information, or in-depth explanations on any topic.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "The research question or topic to investigate"
+            },
+            "context": {
+                "type": "string",
+                "description": "Optional additional context to help guide the research (e.g., 'for a high school student', 'technical explanation', etc.)"
+            }
+        },
+        "required": [
+            "query"
+        ]
+    }
+}
